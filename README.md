@@ -1,5 +1,5 @@
 # git_prompt
-Fast "git prompt" generator for use in command line prompt
+Fast "git prompt" generator for use in command line prompt written in C++
 
 Depends on gitlib2
 
