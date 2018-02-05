@@ -74,7 +74,7 @@ SRCDIRS   =
 
 # The executable file name.
 # If not specified, current directory name or `a.out' will be used.
-PROGRAM   = git_prompt.exe
+PROGRAM   = git_prompt
 
 
 BINDIR = /usr/bin
@@ -242,7 +242,7 @@ endif
 endif
 
 clean:
-	$(RM) $(OBJS) $(PROGRAM) $(PROGRAM).exe
+	$(RM) $(OBJS) $(PROGRAM) $(PROGRAM)
 
 distclean: clean
 	$(RM) $(DEPS) TAGS
