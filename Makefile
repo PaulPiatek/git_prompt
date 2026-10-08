@@ -60,7 +60,12 @@
 MY_CFLAGS =
 
 # The linker options.
-MY_LIBS   = -lgit2
+# Prefer pkg-config when available, fall back to plain -lgit2.
+GIT2_LIBS := $(shell pkg-config --libs libgit2 2>/dev/null)
+ifeq ($(GIT2_LIBS),)
+GIT2_LIBS = -lgit2
+endif
+MY_LIBS   = $(GIT2_LIBS)
 
 # The pre-processor options used by the cpp (man cpp for more).
 CPPFLAGS  = -Wall
@@ -94,8 +99,8 @@ HDREXTS = .h .H .hh .hpp .HPP .h++ .hxx .hp
 # Users can override those variables from the command line.
 #CFLAGS  = -g -O2
 #CXXFLAGS= -g -O2
-CFLAGS  = -O4
-CXXFLAGS= -O4
+CFLAGS  = -O2
+CXXFLAGS= -O2
 
 # The C program compiler.
 #CC     = gcc

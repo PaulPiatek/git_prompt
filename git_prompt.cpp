@@ -1,223 +1,191 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
+#include <clocale>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <unistd.h>
+
 #include <git2.h>
 #include <git2/status.h>
 
-#ifndef COLOR
+#if !defined(COLOR) && !defined(RAW)
 #define RAW
 #endif
 
+namespace {
+
 template <typename T>
-std::string to_string(T value) // missing on cygwin libstdc++ ?
+std::string to_str(const T &value)
 {
-//create an output string stream
-    std::ostringstream os ;
-//throw the value into the string stream
-    os << value ;
-//convert the string stream into a string and return
-    return os.str() ;
+    std::ostringstream os;
+    os << value;
+    return os.str();
 }
 
+// Ensures git_libgit2_shutdown() is always called, on every return path.
+struct Libgit2Guard
+{
+    Libgit2Guard() { git_libgit2_init(); }
+    ~Libgit2Guard() { git_libgit2_shutdown(); }
+};
+
+} // namespace
 
 int main(void)
 {
-    setlocale(LC_ALL, "");
-    git_libgit2_init();
+    std::setlocale(LC_ALL, "");
 
-    // current dir
-    char* dir;
-    dir = getcwd(NULL, 0);
-    //std::cout << dir << std::endl;
+    Libgit2Guard libgit2_guard;
 
-    // define variables
+    // Current directory.
+    char *dir = getcwd(NULL, 0);
+    if (dir == NULL)
+        return 0;
+
     git_repository *repo = NULL;
     git_status_list *status = NULL;
     git_reference *head = NULL;
-    const char *branch = NULL;
-    int error;
+    git_reference *upstream = NULL;
+    size_t ahead = 0;
+    size_t behind = 0;
+    std::string branch;
 
-    // open git repo
-    error = git_repository_open_ext(&repo, dir, 0, NULL);
+    // Open git repo (searches parent directories).
+    int error = git_repository_open_ext(&repo, dir, 0, NULL);
+    free(dir);
     if (error != 0) // no repo
-    {
-        return(0);
-    }
+        return 0;
 
-    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
-    opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
-                 GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX;
-
-    // branch
+    // Branch.
     error = git_repository_head(&head, repo);
-    if (error != 0) // no repo
+    if (error != 0) // unborn / detached / no HEAD
     {
-        return(0);
+        git_repository_free(repo);
+        return 0;
     }
-    branch = git_reference_shorthand(head);
-    //std::cout << "branch: " << branch << std::endl;
 
-    // before/ahead
-    size_t ahead, behind = (size_t)0;
-    git_oid masterOid, originMasterOid;
-    if (!git_reference_name_to_id(&masterOid, repo, "refs/heads/master"))
+    const char *branch_name = git_reference_shorthand(head);
+    branch = (branch_name != NULL) ? branch_name : "HEAD";
+
+    // Ahead/behind relative to the branch's configured upstream.
+    // Only tracked branches have an upstream; everything else stays 0.
+    if (git_branch_upstream(&upstream, head) == 0)
     {
-        if (!git_reference_name_to_id(&originMasterOid, repo, "refs/remotes/origin/master"))
+        const git_oid *local_oid = git_reference_target(head);
+        const git_oid *upstream_oid = git_reference_target(upstream);
+        if (local_oid != NULL && upstream_oid != NULL)
         {
-            if (!git_graph_ahead_behind(&ahead, &behind, repo, &masterOid, &originMasterOid))
-            {
-            }
-            else // no ahead_behind
+            if (git_graph_ahead_behind(&ahead, &behind,
+                                       repo, local_oid, upstream_oid) != 0)
             {
                 ahead = 0;
                 behind = 0;
             }
         }
-        else // no remote
-        {
-                ahead = 0;
-                behind = 0;            
-        }
     }
-    
-    //std::cout << "ahead: " << ahead << std::endl;
-    //std::cout << "behind: " << behind << std::endl;
 
-    // status
-    git_status_list_new(&status, repo, &opts);
-    size_t count = git_status_list_entrycount(status);
-    //std::cout << "listsize: " << count << std::endl;
+    // Status. entry->status is a bitmask, so test individual bits rather
+    // than switching on the whole value (combined states would be missed).
+    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+    opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
+                 GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX;
 
-    bool i_new = false, i_mod = false, i_del = false, i_ren = false, i_chng = false, w_new = false, w_mod = false, w_del = false, w_chng = false, w_ren = false, w_con = false, flag = false;
-    for (size_t i = 0; i < count; ++i)
+    bool w_new = false, w_mod = false, w_del = false, i_any = false, w_con = false;
+
+    if (git_status_list_new(&status, repo, &opts) == 0)
     {
-        const git_status_entry *entry = git_status_byindex(status, i);
-        switch (entry->status)
+        const size_t count = git_status_list_entrycount(status);
+        for (size_t i = 0; i < count; ++i)
         {
-        case GIT_STATUS_INDEX_NEW:
-            i_new = true;
-            flag = true;
-            break;
-        case GIT_STATUS_INDEX_MODIFIED:
-            i_mod = true;
-            flag = true;
-            break;
-        case GIT_STATUS_INDEX_DELETED:
-            i_del = true;
-            flag = true;
-            break;
-        case GIT_STATUS_INDEX_RENAMED:
-            i_ren = true;
-            flag = true;
-            break;
-        case GIT_STATUS_INDEX_TYPECHANGE:
-            i_chng = true;
-            flag = true;
-            break;
+            const git_status_entry *entry = git_status_byindex(status, i);
+            if (entry == NULL)
+                continue;
 
-        case GIT_STATUS_WT_NEW:
-            w_new = true;
-            flag = true;
-            break;
-        case GIT_STATUS_WT_MODIFIED:
-            w_mod = true;
-            flag = true;
-            break;
-        case GIT_STATUS_WT_DELETED:
-            w_del = true;
-            flag = true;
-            break;
-        case GIT_STATUS_WT_TYPECHANGE:
-            w_chng = true;
-            flag = true;
-            break;
-        case GIT_STATUS_WT_RENAMED:
-            w_ren = true;
-            flag = true;
-            break;
+            const unsigned int st = entry->status;
 
-        case GIT_STATUS_CONFLICTED:
-            w_con = true;
-            flag = true;
-            break;
-
-        default: //GIT_STATUS_WT_UNREADABLE, GIT_STATUS_IGNORED
-            break;
+            if (st & GIT_STATUS_WT_NEW)
+                w_new = true;
+            if (st & (GIT_STATUS_WT_MODIFIED | GIT_STATUS_WT_RENAMED | GIT_STATUS_WT_TYPECHANGE))
+                w_mod = true;
+            if (st & GIT_STATUS_WT_DELETED)
+                w_del = true;
+            if (st & (GIT_STATUS_INDEX_NEW | GIT_STATUS_INDEX_MODIFIED |
+                      GIT_STATUS_INDEX_DELETED | GIT_STATUS_INDEX_RENAMED |
+                      GIT_STATUS_INDEX_TYPECHANGE))
+                i_any = true;
+            if (st & GIT_STATUS_CONFLICTED)
+                w_con = true;
         }
-        /*
-        std::cout << "worktree modified: " << w_mod << std::endl;
-        std::cout << "worktree new: " << (entry->status == GIT_STATUS_WT_NEW) << std::endl;
-        std::cout << "index new: " << (entry->status == GIT_STATUS_INDEX_NEW) << std::endl;
-        std::cout << "index mod: " << (entry->status == GIT_STATUS_INDEX_MODIFIED) << std::endl;
-        std::cout << "index del: " << (entry->status == GIT_STATUS_INDEX_DELETED) << std::endl;
-        */
     }
 
-    // print string
+    const bool flag = w_new || w_mod || w_del || i_any || w_con;
+
+    // Print string.
     std::string s;
-    
-    #ifdef COLOR
-    std::string c_bracket;
-    std::string c_text;
-    std::string c_reset;
-    char* sty = std::getenv("STY");
-    if (sty != NULL && std::strcmp("VSCode", sty) == 0)
+
+#ifdef COLOR
+    // Colour only when writing to a terminal, so piping stays clean.
+    const bool use_color = isatty(fileno(stdout)) != 0;
+    const char *c_bracket = "\033[1;33m";
+    const char *c_text = "\033[1;32m";
+    const char *c_reset = "\033[0m";
+
+    const char *sty = std::getenv("STY");
+    if (sty != NULL && std::strcmp(sty, "VSCode") == 0)
     {
         c_bracket = "\033[33m";
         c_text = "\033[32m";
-        c_reset = "\033[0m";
     }
+
+    if (use_color)
+        s = std::string(c_bracket) + "[" + c_text + branch;
     else
-    {
-        c_bracket = "\033[0,100m";
-        c_text = "\033[0,40m";
-        c_reset = "\033[0m";
-    }
-    s = c_bracket + "[" + c_text + branch;
-    #elif defined(RAW)
+        s = branch;
+#else
     s = branch;
-    #endif
-    
+#endif
 
     if (flag)
     {
         s += " ";
         if (w_new)
             s += "?";
-        if (w_mod || w_ren || w_chng)    
+        if (w_mod)
             s += "~";
-        if (w_del)    
+        if (w_del)
             s += "-";
-        if (i_new || i_mod || i_ren || i_chng || i_del)
+        if (i_any)
             s += "*";
-        if (w_con)    
-            s += "#";            
+        if (w_con)
+            s += "#";
     }
 
     if (ahead != 0 || behind != 0)
     {
         s += " ";
         if (ahead != 0)
-            s += "↑" + to_string(ahead);
+            s += "\u2191" + to_str(ahead);
         if (behind != 0)
-            s += "↓" + to_string(behind);  
+            s += "\u2193" + to_str(behind);
     }
 
-    #ifdef COLOR
-    s += c_bracket + "]" + c_reset;
-    #endif
-    
+#ifdef COLOR
+    if (use_color)
+        s += std::string(c_bracket) + "]" + c_reset;
+#endif
 
     std::cout << s << std::endl;
-    
+
+    git_reference_free(upstream);
+    git_reference_free(head);
     git_status_list_free(status);
     git_repository_free(repo);
-    git_libgit2_shutdown();
-    return (0);
+    return 0;
 }
