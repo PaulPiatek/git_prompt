@@ -28,12 +28,26 @@ std::string to_str(const T &value)
     return os.str();
 }
 
+// "refs/heads/foo" -> "foo"; anything else is returned unchanged.
+std::string refs_heads_shorthand(const char *refname)
+{
+    static const char prefix[] = "refs/heads/";
+    if (refname == NULL)
+        return std::string();
+    if (std::strncmp(refname, prefix, sizeof(prefix) - 1) == 0)
+        return std::string(refname + sizeof(prefix) - 1);
+    return std::string(refname);
+}
+
 // Ensures git_libgit2_shutdown() is always called, on every return path.
 struct Libgit2Guard
 {
     Libgit2Guard() { git_libgit2_init(); }
     ~Libgit2Guard() { git_libgit2_shutdown(); }
 };
+
+// Number of hex digits shown for a commit in detached-HEAD state.
+const size_t kShortOidLen = 7;
 
 } // namespace
 
@@ -62,20 +76,48 @@ int main(void)
     if (error != 0) // no repo
         return 0;
 
-    // Branch.
+    // Branch. git_repository_head resolves HEAD to a direct reference; it
+    // succeeds for detached HEAD and fails with GIT_EUNBORNBRANCH when HEAD
+    // points at a branch that has no commits yet.
     error = git_repository_head(&head, repo);
-    if (error != 0) // unborn / detached / no HEAD
+    if (error == GIT_EUNBORNBRANCH)
+    {
+        // Show the intended branch name from the symbolic HEAD rather than
+        // printing nothing; the status below still works without any commits.
+        git_reference *symbolic_head = NULL;
+        if (git_reference_lookup(&symbolic_head, repo, "HEAD") == 0)
+        {
+            branch = refs_heads_shorthand(git_reference_symbolic_target(symbolic_head));
+            git_reference_free(symbolic_head);
+        }
+        if (branch.empty())
+            branch = "HEAD";
+    }
+    else if (error != 0) // no HEAD
     {
         git_repository_free(repo);
         return 0;
     }
-
-    const char *branch_name = git_reference_shorthand(head);
-    branch = (branch_name != NULL) ? branch_name : "HEAD";
+    else if (git_repository_head_detached(repo) > 0)
+    {
+        // Detached HEAD: show the abbreviated commit rather than "HEAD".
+        const git_oid *oid = git_reference_target(head);
+        const char *oid_str = (oid != NULL) ? git_oid_tostr_s(oid) : NULL;
+        if (oid_str != NULL)
+            branch.assign(oid_str, kShortOidLen);
+        else
+            branch = "HEAD";
+    }
+    else
+    {
+        const char *branch_name = git_reference_shorthand(head);
+        branch = (branch_name != NULL) ? branch_name : "HEAD";
+    }
 
     // Ahead/behind relative to the branch's configured upstream.
-    // Only tracked branches have an upstream; everything else stays 0.
-    if (git_branch_upstream(&upstream, head) == 0)
+    // Only tracked local branches have an upstream; everything else stays 0.
+    if (head != NULL && git_reference_is_branch(head) &&
+        git_branch_upstream(&upstream, head) == 0)
     {
         const git_oid *local_oid = git_reference_target(head);
         const git_oid *upstream_oid = git_reference_target(upstream);
@@ -92,10 +134,11 @@ int main(void)
 
     // Status. entry->status is a bitmask, so test individual bits rather
     // than switching on the whole value (combined states would be missed).
+    // Rename detection is deliberately not enabled: a rename already shows up
+    // as a new + deleted pair and the diff work would only slow the prompt.
     git_status_options opts = GIT_STATUS_OPTIONS_INIT;
     opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
-    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
-                 GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX;
+    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED;
 
     bool w_new = false, w_mod = false, w_del = false, i_any = false, w_con = false;
 
@@ -112,7 +155,7 @@ int main(void)
 
             if (st & GIT_STATUS_WT_NEW)
                 w_new = true;
-            if (st & (GIT_STATUS_WT_MODIFIED | GIT_STATUS_WT_RENAMED | GIT_STATUS_WT_TYPECHANGE))
+            if (st & (GIT_STATUS_WT_MODIFIED | GIT_STATUS_WT_TYPECHANGE | GIT_STATUS_WT_UNREADABLE))
                 w_mod = true;
             if (st & GIT_STATUS_WT_DELETED)
                 w_del = true;
